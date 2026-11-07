@@ -1,0 +1,107 @@
+name: verify-distribution
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            artifact: linux-amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            artifact: linux-arm64
+          - runner: windows-2022
+            platform: windows/amd64
+            artifact: windows-amd64
+          - runner: windows-11-arm
+            platform: windows/arm64
+            artifact: windows-arm64
+          - runner: macos-15-intel
+            platform: darwin/amd64
+            artifact: darwin-amd64
+          - runner: macos-15
+            platform: darwin/arm64
+            artifact: darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - run: go vet ./...
+      - shell: bash
+        run: test -z "$(gofmt -l *.go tools/*.go)"
+      - name: Build native release archive
+        env:
+          PREVIEWCTL_TARGET: ${{ matrix.platform }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            go run ./tools/package.go -target "$PREVIEWCTL_TARGET" -version "${GITHUB_REF_NAME#v}"
+          else
+            go run ./tools/package.go -target "$PREVIEWCTL_TARGET"
+          fi
+      - name: Install and test the archived executable
+        env:
+          PREVIEWCTL_EXPECT_PLATFORM: ${{ matrix.platform }}
+        run: go run ./tools/verify-release.go
+      - name: Check the Windows skill setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PREVIEWCTL_CACHE_DIR = Join-Path $env:RUNNER_TEMP 'previewctl-skill'
+          $cli = & ./skills/previewctl/scripts/setup.ps1
+          & $cli version
+          if ($LASTEXITCODE -ne 0) { throw 'Skill executable failed' }
+          if ((& ./skills/previewctl/scripts/setup.ps1) -ne $cli) { throw 'Skill cache failed' }
+      - name: Check the macOS/Linux skill setup
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export PREVIEWCTL_CACHE_DIR="$RUNNER_TEMP/previewctl-skill"
+          cli="$(sh ./skills/previewctl/scripts/setup.sh)"
+          "$cli" version
+          test "$(sh ./skills/previewctl/scripts/setup.sh)" = "$cli"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: previewctl-${{ matrix.artifact }}
+          path: dist/previewctl_*.*
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: previewctl-*
+          path: dist
+          merge-multiple: true
+      - name: Check the complete distribution
+        shell: bash
+        run: |
+          cd dist
+          archives=(previewctl_*.zip previewctl_*.tar.gz)
+          test "${#archives[@]}" -eq 6
+          sha256sum "${archives[@]}" > checksums.txt
+          sha256sum --check checksums.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: previewctl
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

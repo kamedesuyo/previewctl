@@ -1,0 +1,4 @@
+interface:
+  display_name: "previewctl"
+  short_description: "Manage local web previews across Windows, macOS, and Linux"
+  default_prompt: "Use $previewctl to start and verify this project's local preview."
